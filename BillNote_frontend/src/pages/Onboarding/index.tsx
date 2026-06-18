@@ -17,7 +17,8 @@ const isTauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
 // 后端连通性自检不走共享 axios（会弹 toast），用裸 fetch 避免启动期 toast 叠堆
 function getBackendBase(): string {
   const fromEnv = (import.meta as any).env?.VITE_API_BASE_URL as string | undefined
-  return ((fromEnv && fromEnv.length > 0) ? fromEnv : '/api').replace(/\/$/, '')
+  const base = ((fromEnv && fromEnv.length > 0) ? fromEnv : '/api').replace(/\/$/, '')
+  return base.endsWith('/api') ? base : `${base}/api`
 }
 async function pingBackend(): Promise<boolean> {
   try {

@@ -17,7 +17,8 @@ const SYS_HEALTH_PATH = '/sys_health'
 function backendBase(): string {
   // 与 utils/request.ts 的 baseURL 计算保持一致：env 没设走 '/api' 兜底。
   const fromEnv = (import.meta as any).env?.VITE_API_BASE_URL as string | undefined
-  return ((fromEnv && fromEnv.length > 0) ? fromEnv : '/api').replace(/\/$/, '')
+  const base = ((fromEnv && fromEnv.length > 0) ? fromEnv : '/api').replace(/\/$/, '')
+  return base.endsWith('/api') ? base : `${base}/api`
 }
 
 const BackendHealthIndicator = () => {

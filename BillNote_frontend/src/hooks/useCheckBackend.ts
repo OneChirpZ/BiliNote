@@ -15,7 +15,8 @@ const isTauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
 // 启动期每次 /sys_check 失败都会弹一个红色 toast，2s 一次轮询会叠出十几个。
 function getBackendBase(): string {
   const fromEnv = (import.meta as any).env?.VITE_API_BASE_URL as string | undefined
-  return ((fromEnv && fromEnv.length > 0) ? fromEnv : '/api').replace(/\/$/, '')
+  const base = ((fromEnv && fromEnv.length > 0) ? fromEnv : '/api').replace(/\/$/, '')
+  return base.endsWith('/api') ? base : `${base}/api`
 }
 
 async function probeSysCheck(): Promise<boolean> {
