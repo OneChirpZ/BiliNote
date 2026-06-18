@@ -66,7 +66,8 @@ class TranscriberConfigManager:
         """当前转写器是否就绪可用。
 
         返回 {ready, transcriber_type, model_size, downloading, reason}：
-          - 在线引擎 (groq/bcut/kuaishou/doubao-asr)：永远 ready（不需要本地模型）
+          - 在线引擎 (groq/bcut/kuaishou)：永远 ready（不需要本地模型）
+          - doubao-asr：需要 VOLCENGINE_ASR_API_KEY
           - fast-whisper：检查 whisper-{size}/model.bin 落盘
           - mlx-whisper：检查 {repo_id}/config.json 落盘
         给 /generate_note 入口做「开始视频前先确认模型下载好」的门禁用。
@@ -81,6 +82,13 @@ class TranscriberConfigManager:
             "downloading": False,
             "reason": "",
         }
+        if ttype == "doubao-asr":
+            if os.getenv("VOLCENGINE_ASR_API_KEY"):
+                return result
+            result["ready"] = False
+            result["reason"] = "豆包 ASR 未配置 VOLCENGINE_ASR_API_KEY，请先在 .env 中填写火山引擎 API Key"
+            return result
+
         if ttype not in ("fast-whisper", "mlx-whisper"):
             return result  # 在线引擎无需本地模型
 

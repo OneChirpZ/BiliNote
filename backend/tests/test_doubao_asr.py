@@ -11,20 +11,21 @@ from unittest.mock import patch
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 MODULE_PATH = ROOT / "app" / "transcriber" / "doubao_asr.py"
+CONFIG_MANAGER_PATH = ROOT / "app" / "services" / "transcriber_config_manager.py"
 
 
-def _install_stubs():
+def _app_stubs():
     app_mod = types.ModuleType("app")
     decorators_pkg = types.ModuleType("app.decorators")
     timeit_mod = types.ModuleType("app.decorators.timeit")
     models_pkg = types.ModuleType("app.models")
     transcriber_model_mod = types.ModuleType("app.models.transcriber_model")
+    services_pkg = types.ModuleType("app.services")
+    proxy_config_mod = types.ModuleType("app.services.proxy_config_manager")
     transcriber_pkg = types.ModuleType("app.transcriber")
     base_mod = types.ModuleType("app.transcriber.base")
     utils_pkg = types.ModuleType("app.utils")
     logger_mod = types.ModuleType("app.utils.logger")
-    requests_mod = types.ModuleType("requests")
-    dotenv_mod = types.ModuleType("dotenv")
 
     def timeit(func):
         return func
@@ -42,14 +43,12 @@ def _install_stubs():
         segments: list
         raw: dict | None = None
 
+    class ProxyConfigManager:
+        @staticmethod
+        def get_proxy_url():
+            return None
+
     class Transcriber:
-        pass
-
-    class _RequestsSession:
-        def post(self, *_args, **_kwargs):
-            raise AssertionError("requests.Session should be replaced by FakeSession in tests")
-
-    class _RequestsResponse:
         pass
 
     class _Logger:
@@ -68,41 +67,43 @@ def _install_stubs():
     timeit_mod.timeit = timeit
     transcriber_model_mod.TranscriptSegment = TranscriptSegment
     transcriber_model_mod.TranscriptResult = TranscriptResult
+    proxy_config_mod.ProxyConfigManager = ProxyConfigManager
     base_mod.Transcriber = Transcriber
     logger_mod.get_logger = lambda _name: _Logger()
-    requests_mod.Session = _RequestsSession
-    requests_mod.Response = _RequestsResponse
-    dotenv_mod.load_dotenv = lambda: None
 
-    sys.modules.setdefault("app", app_mod)
-    sys.modules.setdefault("app.decorators", decorators_pkg)
-    sys.modules["app.decorators.timeit"] = timeit_mod
-    sys.modules.setdefault("app.models", models_pkg)
-    sys.modules["app.models.transcriber_model"] = transcriber_model_mod
-    sys.modules.setdefault("app.transcriber", transcriber_pkg)
-    sys.modules["app.transcriber.base"] = base_mod
-    sys.modules.setdefault("app.utils", utils_pkg)
-    sys.modules["app.utils.logger"] = logger_mod
-    sys.modules["requests"] = requests_mod
-    sys.modules["dotenv"] = dotenv_mod
+    return {
+        "app": app_mod,
+        "app.decorators": decorators_pkg,
+        "app.decorators.timeit": timeit_mod,
+        "app.models": models_pkg,
+        "app.models.transcriber_model": transcriber_model_mod,
+        "app.services": services_pkg,
+        "app.services.proxy_config_manager": proxy_config_mod,
+        "app.transcriber": transcriber_pkg,
+        "app.transcriber.base": base_mod,
+        "app.utils": utils_pkg,
+        "app.utils.logger": logger_mod,
+    }
 
 
-def _load_doubao_asr_module():
-    _install_stubs()
-    spec = importlib.util.spec_from_file_location("doubao_asr", MODULE_PATH)
+def _load_module(module_name, path, stubs=None):
+    spec = importlib.util.spec_from_file_location(module_name, path)
     if spec is None or spec.loader is None:
-        raise ImportError("doubao_asr module spec not found")
+        raise ImportError(f"{module_name} module spec not found")
     module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    with patch.dict(sys.modules, stubs or {}):
+        spec.loader.exec_module(module)
     return module
 
 
-doubao_asr = _load_doubao_asr_module()
+doubao_asr = _load_module("doubao_asr_under_test", MODULE_PATH, _app_stubs())
+transcriber_config_manager = _load_module("transcriber_config_manager_under_test", CONFIG_MANAGER_PATH)
 DONE_CODE = doubao_asr.DONE_CODE
 QUERY_URL = doubao_asr.QUERY_URL
 RUNNING_CODES = doubao_asr.RUNNING_CODES
 SUBMIT_URL = doubao_asr.SUBMIT_URL
 DoubaoASRTranscriber = doubao_asr.DoubaoASRTranscriber
+TranscriberConfigManager = transcriber_config_manager.TranscriberConfigManager
 
 
 class FakeResponse:
@@ -124,6 +125,7 @@ class FakeSession:
     def __init__(self, responses):
         self.responses = list(responses)
         self.calls = []
+        self.proxies = {}
 
     def post(self, url, **kwargs):
         self.calls.append((url, kwargs))
@@ -242,6 +244,53 @@ class DoubaoASRTranscriberTest(unittest.TestCase):
 
         self.assertIn("VOLCENGINE_ASR_API_KEY", str(ctx.exception))
         self.assertNotIn("test-key", str(ctx.exception))
+
+    def test_unsupported_audio_format_raises_before_http_call(self):
+        path = pathlib.Path(self.tmp.name).with_suffix(".webm")
+        path.write_bytes(b"fake audio")
+        try:
+            session = FakeSession([])
+
+            with self.assertRaises(ValueError) as ctx:
+                DoubaoASRTranscriber(session=session).transcript(str(path))
+
+            self.assertIn("不支持当前音频格式", str(ctx.exception))
+            self.assertEqual(session.calls, [])
+        finally:
+            path.unlink(missing_ok=True)
+
+    def test_large_audio_raises_before_reading_payload(self):
+        with patch.dict(os.environ, {"VOLCENGINE_ASR_MAX_AUDIO_SIZE_MB": "0.000001"}, clear=False):
+            session = FakeSession([])
+
+            with self.assertRaises(ValueError) as ctx:
+                DoubaoASRTranscriber(session=session).transcript(self.tmp.name)
+
+        self.assertIn("音频文件过大", str(ctx.exception))
+        self.assertEqual(session.calls, [])
+
+    def test_applies_global_proxy_config_to_session(self):
+        class FakeProxyConfigManager:
+            @staticmethod
+            def get_proxy_url():
+                return "http://127.0.0.1:7890"
+
+        session = FakeSession([])
+        with patch.object(doubao_asr, "ProxyConfigManager", FakeProxyConfigManager):
+            DoubaoASRTranscriber(session=session)
+
+        self.assertEqual(session.proxies["https"], "http://127.0.0.1:7890")
+
+    def test_doubao_config_not_ready_without_api_key(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            cfg_path = pathlib.Path(tmp_dir) / "transcriber.json"
+            cfg_path.write_text(json.dumps({"transcriber_type": "doubao-asr"}), encoding="utf-8")
+
+            with patch.dict(os.environ, {"VOLCENGINE_ASR_API_KEY": ""}, clear=False):
+                result = TranscriberConfigManager(str(cfg_path)).is_model_ready()
+
+        self.assertFalse(result["ready"])
+        self.assertIn("VOLCENGINE_ASR_API_KEY", result["reason"])
 
 
 if __name__ == "__main__":

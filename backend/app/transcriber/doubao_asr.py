@@ -10,6 +10,7 @@ from dotenv import load_dotenv
 
 from app.decorators.timeit import timeit
 from app.models.transcriber_model import TranscriptResult, TranscriptSegment
+from app.services.proxy_config_manager import ProxyConfigManager
 from app.transcriber.base import Transcriber
 from app.utils.logger import get_logger
 
@@ -24,6 +25,7 @@ RUNNING_CODES = {"20000001", "20000002"}
 DEFAULT_RESOURCE_ID = "volc.seedasr.auc"
 DEFAULT_POLL_INTERVAL_SECONDS = 5.0
 DEFAULT_TIMEOUT_SECONDS = 1800.0
+DEFAULT_MAX_AUDIO_SIZE_MB = 200.0
 SUPPORTED_FORMATS = {"mp3", "wav", "m4a", "ogg", "flac", "aac", "amr"}
 
 
@@ -41,6 +43,11 @@ class DoubaoASRTranscriber(Transcriber):
             "VOLCENGINE_ASR_TIMEOUT_SECONDS",
             DEFAULT_TIMEOUT_SECONDS,
         )
+        self.max_audio_size_mb = _get_float_env(
+            "VOLCENGINE_ASR_MAX_AUDIO_SIZE_MB",
+            DEFAULT_MAX_AUDIO_SIZE_MB,
+        )
+        self._apply_proxy_config()
 
     @timeit
     def transcript(self, file_path: str) -> TranscriptResult:
@@ -78,13 +85,20 @@ class DoubaoASRTranscriber(Transcriber):
 
     def _submit_payload(self, file_path: str) -> Dict[str, Any]:
         path = Path(file_path)
-        audio_bytes = path.read_bytes()
-        if not audio_bytes:
+        audio_format = self._infer_audio_format(path)
+        audio_size = path.stat().st_size
+        if audio_size <= 0:
             raise ValueError("音频文件为空，无法提交豆包 ASR。")
 
-        audio_format = self._infer_audio_format(path)
-        audio_size_mb = len(audio_bytes) / 1024 / 1024
+        audio_size_mb = audio_size / 1024 / 1024
+        if audio_size_mb > self.max_audio_size_mb:
+            raise ValueError(
+                f"音频文件过大，无法使用 base64 提交豆包 ASR: "
+                f"size={audio_size_mb:.2f}MB, limit={self.max_audio_size_mb:.2f}MB。"
+            )
+
         logger.info("豆包 ASR 提交音频: format=%s, size=%.2fMB", audio_format, audio_size_mb)
+        audio_bytes = path.read_bytes()
 
         return {
             "user": {"uid": "bilinote"},
@@ -219,7 +233,18 @@ class DoubaoASRTranscriber(Transcriber):
         suffix = path.suffix.lower().lstrip(".")
         if suffix in SUPPORTED_FORMATS:
             return suffix
-        return "mp3"
+        raise ValueError(
+            f"豆包 ASR 不支持当前音频格式: .{suffix or 'unknown'}。"
+            f"请先转为以下格式之一: {', '.join(sorted(SUPPORTED_FORMATS))}。"
+        )
+
+    def _apply_proxy_config(self) -> None:
+        proxy_url = ProxyConfigManager().get_proxy_url()
+        if proxy_url:
+            if not hasattr(self.session, "proxies"):
+                self.session.proxies = {}
+            self.session.proxies.update({"http": proxy_url, "https": proxy_url})
+            logger.info("豆包 ASR 已使用全局代理配置。")
 
 
 def _get_float_env(name: str, default: float) -> float:
