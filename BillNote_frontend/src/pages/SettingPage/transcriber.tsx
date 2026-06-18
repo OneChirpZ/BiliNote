@@ -21,6 +21,8 @@ import {
   addWhisperModel,
   deleteWhisperModel,
   TranscriberConfig,
+  DoubaoASRConfig,
+  DoubaoASRConfigUpdate,
   ModelStatus,
 } from '@/services/transcriber'
 
@@ -33,6 +35,12 @@ export default function Transcriber() {
   const [saving, setSaving] = useState(false)
   const [selectedType, setSelectedType] = useState('')
   const [selectedModelSize, setSelectedModelSize] = useState('')
+  const [doubaoApiKey, setDoubaoApiKey] = useState('')
+  const [doubaoClearApiKey, setDoubaoClearApiKey] = useState(false)
+  const [doubaoResourceId, setDoubaoResourceId] = useState('volc.seedasr.auc')
+  const [doubaoPollInterval, setDoubaoPollInterval] = useState('5')
+  const [doubaoTimeout, setDoubaoTimeout] = useState('1800')
+  const [doubaoMaxAudioSize, setDoubaoMaxAudioSize] = useState('200')
   const [modelStatuses, setModelStatuses] = useState<ModelStatus[]>([])
   const [mlxModelStatuses, setMlxModelStatuses] = useState<ModelStatus[]>([])
   const [mlxAvailable, setMlxAvailable] = useState(false)
@@ -40,6 +48,16 @@ export default function Transcriber() {
   const [newModelName, setNewModelName] = useState('')
   const [newModelTarget, setNewModelTarget] = useState('')
   const [addingModel, setAddingModel] = useState(false)
+
+  const syncDoubaoConfig = (doubaoConfig?: DoubaoASRConfig) => {
+    if (!doubaoConfig) return
+    setDoubaoApiKey('')
+    setDoubaoClearApiKey(false)
+    setDoubaoResourceId(doubaoConfig.resource_id || 'volc.seedasr.auc')
+    setDoubaoPollInterval(String(doubaoConfig.poll_interval_seconds ?? 5))
+    setDoubaoTimeout(String(doubaoConfig.timeout_seconds ?? 1800))
+    setDoubaoMaxAudioSize(String(doubaoConfig.max_audio_size_mb ?? 200))
+  }
 
   // 重新拉取配置（不重置用户当前的选择），用于增删自定义模型后刷新下拉与列表
   const reloadConfig = useCallback(async () => {
@@ -68,6 +86,7 @@ export default function Transcriber() {
         setConfig(data)
         setSelectedType(data.transcriber_type)
         setSelectedModelSize(data.whisper_model_size)
+        syncDoubaoConfig(data.doubao_asr)
       } catch {
         toast.error('获取转写器配置失败')
       } finally {
@@ -111,15 +130,65 @@ export default function Transcriber() {
       }
     }
 
+    if (selectedType === 'doubao-asr') {
+      const pollInterval = Number(doubaoPollInterval)
+      const timeout = Number(doubaoTimeout)
+      const maxAudioSize = Number(doubaoMaxAudioSize)
+      if (!doubaoResourceId.trim()) {
+        toast.error('请填写豆包 ASR Resource ID')
+        return
+      }
+      if (!Number.isFinite(pollInterval) || pollInterval <= 0) {
+        toast.error('请填写有效的轮询间隔')
+        return
+      }
+      if (!Number.isFinite(timeout) || timeout <= 0) {
+        toast.error('请填写有效的轮询超时')
+        return
+      }
+      if (!Number.isFinite(maxAudioSize) || maxAudioSize <= 0) {
+        toast.error('请填写有效的音频大小上限')
+        return
+      }
+      if (!doubaoApiKey.trim() && !config?.doubao_asr?.api_key_configured) {
+        toast.error('请填写火山引擎 API Key')
+        return
+      }
+      if (doubaoClearApiKey && !doubaoApiKey.trim()) {
+        const ok = window.confirm('清除已保存的豆包 ASR API Key；若环境变量存在，清除后仍会继续使用环境变量。继续保存吗？')
+        if (!ok) return
+      }
+    }
+
     setSaving(true)
     try {
-      const payload: { transcriber_type: string; whisper_model_size?: string } = {
+      const payload: {
+        transcriber_type: string
+        whisper_model_size?: string
+        doubao_asr?: DoubaoASRConfigUpdate
+      } = {
         transcriber_type: selectedType,
       }
       if (isWhisperType(selectedType)) {
         payload.whisper_model_size = selectedModelSize
       }
-      await updateTranscriberConfig(payload)
+      if (selectedType === 'doubao-asr') {
+        const doubaoPayload: DoubaoASRConfigUpdate = {
+          resource_id: doubaoResourceId.trim(),
+          poll_interval_seconds: Number(doubaoPollInterval),
+          timeout_seconds: Number(doubaoTimeout),
+          max_audio_size_mb: Number(doubaoMaxAudioSize),
+        }
+        if (doubaoApiKey.trim()) {
+          doubaoPayload.api_key = doubaoApiKey.trim()
+        } else if (doubaoClearApiKey) {
+          doubaoPayload.clear_api_key = true
+        }
+        payload.doubao_asr = doubaoPayload
+      }
+      const data = await updateTranscriberConfig(payload)
+      setConfig(data)
+      syncDoubaoConfig(data.doubao_asr)
       toast.success('转写器配置已保存')
     } catch {
       toast.error('保存失败')
@@ -260,6 +329,79 @@ export default function Transcriber() {
                 安装后重启后端生效。
               </AlertDescription>
             </Alert>
+          )}
+
+          {selectedType === 'doubao-asr' && (
+            <div className="space-y-4 border-t pt-4">
+              <div className="grid gap-4 md:grid-cols-2">
+                <div className="space-y-2">
+                  <label className="text-sm font-medium">火山引擎 API Key</label>
+                  <Input
+                    type="password"
+                    value={doubaoApiKey}
+                    placeholder={config.doubao_asr.api_key_configured ? '已配置，留空则不修改' : '请输入 API Key'}
+                    onChange={e => {
+                      setDoubaoApiKey(e.target.value)
+                      if (e.target.value.trim()) setDoubaoClearApiKey(false)
+                    }}
+                  />
+                  <p className="text-xs text-neutral-400">
+                    {config.doubao_asr.api_key_configured
+                      ? `当前已配置${config.doubao_asr.api_key_source === 'env' ? '（来自环境变量）' : ''}`
+                      : '当前未配置'}
+                  </p>
+                </div>
+                <div className="space-y-2">
+                  <label className="text-sm font-medium">Resource ID</label>
+                  <Input
+                    value={doubaoResourceId}
+                    onChange={e => setDoubaoResourceId(e.target.value)}
+                  />
+                </div>
+                <div className="space-y-2">
+                  <label className="text-sm font-medium">轮询间隔（秒）</label>
+                  <Input
+                    min="0.5"
+                    step="0.5"
+                    type="number"
+                    value={doubaoPollInterval}
+                    onChange={e => setDoubaoPollInterval(e.target.value)}
+                  />
+                </div>
+                <div className="space-y-2">
+                  <label className="text-sm font-medium">轮询超时（秒）</label>
+                  <Input
+                    min="1"
+                    step="1"
+                    type="number"
+                    value={doubaoTimeout}
+                    onChange={e => setDoubaoTimeout(e.target.value)}
+                  />
+                </div>
+                <div className="space-y-2">
+                  <label className="text-sm font-medium">Base64 音频上限（MB）</label>
+                  <Input
+                    min="1"
+                    step="1"
+                    type="number"
+                    value={doubaoMaxAudioSize}
+                    onChange={e => setDoubaoMaxAudioSize(e.target.value)}
+                  />
+                </div>
+              </div>
+              {config.doubao_asr.api_key_source === 'config' && (
+                <Button
+                  type="button"
+                  variant={doubaoClearApiKey ? 'destructive' : 'outline'}
+                  onClick={() => {
+                    setDoubaoApiKey('')
+                    setDoubaoClearApiKey(value => !value)
+                  }}
+                >
+                  {doubaoClearApiKey ? '将清除已保存 API Key' : '清除已保存 API Key'}
+                </Button>
+              )}
+            </div>
           )}
 
           <Button onClick={handleSave} disabled={saving || (selectedType === 'mlx-whisper' && !config.mlx_whisper_available)} className="mt-2">

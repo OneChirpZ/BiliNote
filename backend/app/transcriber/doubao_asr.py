@@ -1,5 +1,4 @@
 import base64
-import os
 import time
 import uuid
 from pathlib import Path
@@ -11,6 +10,7 @@ from dotenv import load_dotenv
 from app.decorators.timeit import timeit
 from app.models.transcriber_model import TranscriptResult, TranscriptSegment
 from app.services.proxy_config_manager import ProxyConfigManager
+from app.services.transcriber_config_manager import TranscriberConfigManager
 from app.transcriber.base import Transcriber
 from app.utils.logger import get_logger
 
@@ -32,41 +32,42 @@ SUPPORTED_FORMATS = {"mp3", "wav", "m4a", "ogg", "flac", "aac", "amr"}
 class DoubaoASRTranscriber(Transcriber):
     """火山引擎豆包录音文件识别标准版转写器。"""
 
-    def __init__(self, session: Optional[requests.Session] = None):
+    def __init__(
+        self,
+        session: Optional[requests.Session] = None,
+        config_manager: Optional[TranscriberConfigManager] = None,
+    ):
         self.session = session or requests.Session()
-        self.resource_id = os.getenv("VOLCENGINE_ASR_RESOURCE_ID", DEFAULT_RESOURCE_ID)
-        self.poll_interval = _get_float_env(
-            "VOLCENGINE_ASR_POLL_INTERVAL_SECONDS",
-            DEFAULT_POLL_INTERVAL_SECONDS,
-        )
-        self.timeout_seconds = _get_float_env(
-            "VOLCENGINE_ASR_TIMEOUT_SECONDS",
-            DEFAULT_TIMEOUT_SECONDS,
-        )
-        self.max_audio_size_mb = _get_float_env(
-            "VOLCENGINE_ASR_MAX_AUDIO_SIZE_MB",
-            DEFAULT_MAX_AUDIO_SIZE_MB,
-        )
+        self.config_manager = config_manager or TranscriberConfigManager()
+        self._managed_proxy = False
         self._apply_proxy_config()
 
     @timeit
     def transcript(self, file_path: str) -> TranscriptResult:
-        api_key = os.getenv("VOLCENGINE_ASR_API_KEY")
+        runtime_config = self._runtime_config()
+        self._apply_proxy_config()
+        api_key = runtime_config["api_key"]
         if not api_key:
-            raise RuntimeError("未配置 VOLCENGINE_ASR_API_KEY，无法使用豆包 ASR。")
+            raise RuntimeError("未配置火山引擎 API Key，无法使用豆包 ASR。请先在「音频转写配置」页填写。")
 
         request_id = str(uuid.uuid4())
+        resource_id = runtime_config["resource_id"]
         logger.info(
             "开始豆包 ASR 标准版转写: file=%s, resource_id=%s, request_id=%s",
             Path(file_path).name,
-            self.resource_id,
+            resource_id,
             request_id,
         )
 
-        headers = self._headers(api_key, request_id)
-        payload = self._submit_payload(file_path)
+        headers = self._headers(api_key, resource_id, request_id)
+        payload = self._submit_payload(file_path, runtime_config["max_audio_size_mb"])
         self._submit(headers, payload, request_id)
-        data, status_code, log_id = self._poll(headers, request_id)
+        data, status_code, log_id = self._poll(
+            headers,
+            request_id,
+            runtime_config["timeout_seconds"],
+            runtime_config["poll_interval_seconds"],
+        )
         return self._to_transcript_result(
             data,
             request_id=request_id,
@@ -74,16 +75,35 @@ class DoubaoASRTranscriber(Transcriber):
             log_id=log_id,
         )
 
-    def _headers(self, api_key: str, request_id: str) -> Dict[str, str]:
+    def _headers(self, api_key: str, resource_id: str, request_id: str) -> Dict[str, str]:
         return {
             "Content-Type": "application/json",
             "X-Api-Key": api_key,
-            "X-Api-Resource-Id": self.resource_id,
+            "X-Api-Resource-Id": resource_id,
             "X-Api-Request-Id": request_id,
             "X-Api-Sequence": "-1",
         }
 
-    def _submit_payload(self, file_path: str) -> Dict[str, Any]:
+    def _runtime_config(self) -> Dict[str, Any]:
+        config = self.config_manager.get_doubao_asr_config(include_secret=True)
+        return {
+            "api_key": str(config.get("api_key") or "").strip(),
+            "resource_id": str(config.get("resource_id") or DEFAULT_RESOURCE_ID).strip(),
+            "poll_interval_seconds": _positive_float_or_default(
+                config.get("poll_interval_seconds"),
+                DEFAULT_POLL_INTERVAL_SECONDS,
+            ),
+            "timeout_seconds": _positive_float_or_default(
+                config.get("timeout_seconds"),
+                DEFAULT_TIMEOUT_SECONDS,
+            ),
+            "max_audio_size_mb": _positive_float_or_default(
+                config.get("max_audio_size_mb"),
+                DEFAULT_MAX_AUDIO_SIZE_MB,
+            ),
+        }
+
+    def _submit_payload(self, file_path: str, max_audio_size_mb: float) -> Dict[str, Any]:
         path = Path(file_path)
         audio_format = self._infer_audio_format(path)
         audio_size = path.stat().st_size
@@ -91,10 +111,10 @@ class DoubaoASRTranscriber(Transcriber):
             raise ValueError("音频文件为空，无法提交豆包 ASR。")
 
         audio_size_mb = audio_size / 1024 / 1024
-        if audio_size_mb > self.max_audio_size_mb:
+        if audio_size_mb > max_audio_size_mb:
             raise ValueError(
                 f"音频文件过大，无法使用 base64 提交豆包 ASR: "
-                f"size={audio_size_mb:.2f}MB, limit={self.max_audio_size_mb:.2f}MB。"
+                f"size={audio_size_mb:.2f}MB, limit={max_audio_size_mb:.2f}MB。"
             )
 
         logger.info("豆包 ASR 提交音频: format=%s, size=%.2fMB", audio_format, audio_size_mb)
@@ -132,14 +152,20 @@ class DoubaoASRTranscriber(Transcriber):
                 f"message={response.headers.get('X-Api-Message', '')}, log_id={log_id or '-'}"
             )
 
-    def _poll(self, headers: Dict[str, str], request_id: str) -> tuple[Dict[str, Any], str, str]:
-        deadline = time.monotonic() + self.timeout_seconds
+    def _poll(
+        self,
+        headers: Dict[str, str],
+        request_id: str,
+        timeout_seconds: float,
+        poll_interval: float,
+    ) -> tuple[Dict[str, Any], str, str]:
+        deadline = time.monotonic() + timeout_seconds
         attempt = 0
 
         while True:
             if time.monotonic() >= deadline:
                 raise TimeoutError(
-                    f"豆包 ASR 轮询超时: request_id={request_id}, timeout={self.timeout_seconds}s"
+                    f"豆包 ASR 轮询超时: request_id={request_id}, timeout={timeout_seconds}s"
                 )
 
             attempt += 1
@@ -167,7 +193,7 @@ class DoubaoASRTranscriber(Transcriber):
                         attempt,
                         log_id or "-",
                     )
-                time.sleep(self.poll_interval)
+                time.sleep(poll_interval)
                 continue
 
             raise RuntimeError(
@@ -244,18 +270,24 @@ class DoubaoASRTranscriber(Transcriber):
             if not hasattr(self.session, "proxies"):
                 self.session.proxies = {}
             self.session.proxies.update({"http": proxy_url, "https": proxy_url})
+            self._managed_proxy = True
             logger.info("豆包 ASR 已使用全局代理配置。")
+        elif self._managed_proxy and hasattr(self.session, "proxies"):
+            self.session.proxies.pop("http", None)
+            self.session.proxies.pop("https", None)
+            self._managed_proxy = False
 
 
-def _get_float_env(name: str, default: float) -> float:
-    value = os.getenv(name)
-    if not value:
-        return default
+def _float_or_default(value: Any, default: float) -> float:
     try:
         return float(value)
-    except ValueError:
-        logger.warning("%s=%s 不是有效数字，使用默认值 %s", name, value, default)
+    except (TypeError, ValueError):
         return default
+
+
+def _positive_float_or_default(value: Any, default: float) -> float:
+    parsed = _float_or_default(value, default)
+    return parsed if parsed > 0 else default
 
 
 def _response_json(response: requests.Response) -> Dict[str, Any]:

@@ -2,6 +2,7 @@ import json
 import importlib.util
 import os
 import pathlib
+import stat
 import sys
 import tempfile
 import types
@@ -22,6 +23,7 @@ def _app_stubs():
     transcriber_model_mod = types.ModuleType("app.models.transcriber_model")
     services_pkg = types.ModuleType("app.services")
     proxy_config_mod = types.ModuleType("app.services.proxy_config_manager")
+    transcriber_config_mod = types.ModuleType("app.services.transcriber_config_manager")
     transcriber_pkg = types.ModuleType("app.transcriber")
     base_mod = types.ModuleType("app.transcriber.base")
     utils_pkg = types.ModuleType("app.utils")
@@ -48,6 +50,21 @@ def _app_stubs():
         def get_proxy_url():
             return None
 
+    class TranscriberConfigManager:
+        @staticmethod
+        def get_doubao_asr_config(include_secret=False):
+            config = {
+                "resource_id": os.getenv("VOLCENGINE_ASR_RESOURCE_ID", "volc.seedasr.auc"),
+                "poll_interval_seconds": float(os.getenv("VOLCENGINE_ASR_POLL_INTERVAL_SECONDS", "5")),
+                "timeout_seconds": float(os.getenv("VOLCENGINE_ASR_TIMEOUT_SECONDS", "1800")),
+                "max_audio_size_mb": float(os.getenv("VOLCENGINE_ASR_MAX_AUDIO_SIZE_MB", "200")),
+                "api_key_configured": bool(os.getenv("VOLCENGINE_ASR_API_KEY")),
+                "api_key_source": "env" if os.getenv("VOLCENGINE_ASR_API_KEY") else "",
+            }
+            if include_secret:
+                config["api_key"] = os.getenv("VOLCENGINE_ASR_API_KEY", "")
+            return config
+
     class Transcriber:
         pass
 
@@ -68,6 +85,7 @@ def _app_stubs():
     transcriber_model_mod.TranscriptSegment = TranscriptSegment
     transcriber_model_mod.TranscriptResult = TranscriptResult
     proxy_config_mod.ProxyConfigManager = ProxyConfigManager
+    transcriber_config_mod.TranscriberConfigManager = TranscriberConfigManager
     base_mod.Transcriber = Transcriber
     logger_mod.get_logger = lambda _name: _Logger()
 
@@ -79,6 +97,7 @@ def _app_stubs():
         "app.models.transcriber_model": transcriber_model_mod,
         "app.services": services_pkg,
         "app.services.proxy_config_manager": proxy_config_mod,
+        "app.services.transcriber_config_manager": transcriber_config_mod,
         "app.transcriber": transcriber_pkg,
         "app.transcriber.base": base_mod,
         "app.utils": utils_pkg,
@@ -144,7 +163,7 @@ class DoubaoASRTranscriberTest(unittest.TestCase):
             os.environ,
             {
                 "VOLCENGINE_ASR_API_KEY": "test-key",
-                "VOLCENGINE_ASR_POLL_INTERVAL_SECONDS": "0",
+                "VOLCENGINE_ASR_POLL_INTERVAL_SECONDS": "0.001",
                 "VOLCENGINE_ASR_TIMEOUT_SECONDS": "5",
             },
             clear=False,
@@ -242,8 +261,81 @@ class DoubaoASRTranscriberTest(unittest.TestCase):
             with self.assertRaises(RuntimeError) as ctx:
                 DoubaoASRTranscriber(session=FakeSession([])).transcript(self.tmp.name)
 
-        self.assertIn("VOLCENGINE_ASR_API_KEY", str(ctx.exception))
+        self.assertIn("火山引擎 API Key", str(ctx.exception))
         self.assertNotIn("test-key", str(ctx.exception))
+
+    def test_saved_config_is_used_for_headers(self):
+        class FakeConfigManager:
+            @staticmethod
+            def get_doubao_asr_config(include_secret=False):
+                config = {
+                    "resource_id": "custom-resource",
+                    "poll_interval_seconds": 0,
+                    "timeout_seconds": 5,
+                    "max_audio_size_mb": 200,
+                    "api_key_configured": True,
+                    "api_key_source": "config",
+                }
+                if include_secret:
+                    config["api_key"] = "configured-key"
+                return config
+
+        session = FakeSession([
+            FakeResponse(headers=_done_headers()),
+            FakeResponse(headers=_done_headers(), body={"result": {"text": "配置生效"}}),
+        ])
+
+        with patch.dict(os.environ, {"VOLCENGINE_ASR_API_KEY": ""}, clear=False):
+            result = DoubaoASRTranscriber(
+                session=session,
+                config_manager=FakeConfigManager(),
+            ).transcript(self.tmp.name)
+
+        self.assertEqual(result.full_text, "配置生效")
+        submit_headers = session.calls[0][1]["headers"]
+        self.assertEqual(submit_headers["X-Api-Key"], "configured-key")
+        self.assertEqual(submit_headers["X-Api-Resource-Id"], "custom-resource")
+
+    def test_runtime_config_is_reloaded_between_calls(self):
+        class MutableConfigManager:
+            def __init__(self):
+                self.api_key = "first-key"
+                self.resource_id = "first-resource"
+
+            def get_doubao_asr_config(self, include_secret=False):
+                config = {
+                    "resource_id": self.resource_id,
+                    "poll_interval_seconds": 0.001,
+                    "timeout_seconds": 5,
+                    "max_audio_size_mb": 200,
+                    "api_key_configured": True,
+                    "api_key_source": "config",
+                }
+                if include_secret:
+                    config["api_key"] = self.api_key
+                return config
+
+        config_manager = MutableConfigManager()
+        session = FakeSession([
+            FakeResponse(headers=_done_headers()),
+            FakeResponse(headers=_done_headers(), body={"result": {"text": "第一次"}}),
+            FakeResponse(headers=_done_headers()),
+            FakeResponse(headers=_done_headers(), body={"result": {"text": "第二次"}}),
+        ])
+        transcriber = DoubaoASRTranscriber(session=session, config_manager=config_manager)
+
+        with patch.dict(os.environ, {"VOLCENGINE_ASR_API_KEY": ""}, clear=False):
+            first = transcriber.transcript(self.tmp.name)
+            config_manager.api_key = "second-key"
+            config_manager.resource_id = "second-resource"
+            second = transcriber.transcript(self.tmp.name)
+
+        self.assertEqual(first.full_text, "第一次")
+        self.assertEqual(second.full_text, "第二次")
+        self.assertEqual(session.calls[0][1]["headers"]["X-Api-Key"], "first-key")
+        self.assertEqual(session.calls[0][1]["headers"]["X-Api-Resource-Id"], "first-resource")
+        self.assertEqual(session.calls[2][1]["headers"]["X-Api-Key"], "second-key")
+        self.assertEqual(session.calls[2][1]["headers"]["X-Api-Resource-Id"], "second-resource")
 
     def test_unsupported_audio_format_raises_before_http_call(self):
         path = pathlib.Path(self.tmp.name).with_suffix(".webm")
@@ -275,11 +367,21 @@ class DoubaoASRTranscriberTest(unittest.TestCase):
             def get_proxy_url():
                 return "http://127.0.0.1:7890"
 
+        class EmptyProxyConfigManager:
+            @staticmethod
+            def get_proxy_url():
+                return None
+
         session = FakeSession([])
         with patch.object(doubao_asr, "ProxyConfigManager", FakeProxyConfigManager):
-            DoubaoASRTranscriber(session=session)
+            transcriber = DoubaoASRTranscriber(session=session)
 
         self.assertEqual(session.proxies["https"], "http://127.0.0.1:7890")
+        with patch.object(doubao_asr, "ProxyConfigManager", EmptyProxyConfigManager):
+            transcriber._apply_proxy_config()
+
+        self.assertNotIn("https", session.proxies)
+        self.assertNotIn("http", session.proxies)
 
     def test_doubao_config_not_ready_without_api_key(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -290,7 +392,60 @@ class DoubaoASRTranscriberTest(unittest.TestCase):
                 result = TranscriberConfigManager(str(cfg_path)).is_model_ready()
 
         self.assertFalse(result["ready"])
-        self.assertIn("VOLCENGINE_ASR_API_KEY", result["reason"])
+        self.assertIn("火山引擎 API Key", result["reason"])
+
+    def test_doubao_config_roundtrip_hides_secret(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            cfg_path = pathlib.Path(tmp_dir) / "transcriber.json"
+            manager = TranscriberConfigManager(str(cfg_path))
+            public_config = manager.update_config(
+                transcriber_type="doubao-asr",
+                doubao_asr={
+                    "api_key": "saved-key",
+                    "resource_id": "custom-resource",
+                    "poll_interval_seconds": 2,
+                    "timeout_seconds": 60,
+                    "max_audio_size_mb": 10,
+                },
+            )
+            runtime_config = manager.get_doubao_asr_config(include_secret=True)
+
+        self.assertTrue(public_config["doubao_asr"]["api_key_configured"])
+        self.assertNotIn("api_key", public_config["doubao_asr"])
+        self.assertEqual(public_config["doubao_asr"]["resource_id"], "custom-resource")
+        self.assertEqual(runtime_config["api_key"], "saved-key")
+        self.assertEqual(runtime_config["poll_interval_seconds"], 2)
+
+    def test_doubao_config_file_is_private(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            cfg_path = pathlib.Path(tmp_dir) / "transcriber.json"
+            manager = TranscriberConfigManager(str(cfg_path))
+            manager.update_config(
+                transcriber_type="doubao-asr",
+                doubao_asr={"api_key": "saved-key"},
+            )
+            mode = stat.S_IMODE(cfg_path.stat().st_mode)
+
+        self.assertEqual(mode, 0o600)
+
+    def test_doubao_numeric_config_rejects_invalid_values(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            cfg_path = pathlib.Path(tmp_dir) / "transcriber.json"
+            manager = TranscriberConfigManager(str(cfg_path))
+            public_config = manager.update_config(
+                transcriber_type="doubao-asr",
+                doubao_asr={
+                    "api_key": "saved-key",
+                    "poll_interval_seconds": 0,
+                    "timeout_seconds": 0,
+                    "max_audio_size_mb": -10,
+                },
+            )
+
+        doubao = public_config["doubao_asr"]
+        self.assertEqual(doubao["poll_interval_seconds"], 5.0)
+        self.assertEqual(doubao["timeout_seconds"], 1800.0)
+        self.assertEqual(doubao["max_audio_size_mb"], 200.0)
 
 
 if __name__ == "__main__":

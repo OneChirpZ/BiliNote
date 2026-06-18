@@ -42,9 +42,19 @@ def update_cookie(data: CookieUpdateRequest):
 
     )
 
+class DoubaoASRConfigRequest(BaseModel):
+    api_key: Optional[str] = None
+    clear_api_key: Optional[bool] = None
+    resource_id: Optional[str] = None
+    poll_interval_seconds: Optional[float] = None
+    timeout_seconds: Optional[float] = None
+    max_audio_size_mb: Optional[float] = None
+
+
 class TranscriberConfigRequest(BaseModel):
     transcriber_type: str
     whisper_model_size: Optional[str] = None
+    doubao_asr: Optional[DoubaoASRConfigRequest] = None
 
 
 AVAILABLE_TRANSCRIBER_TYPES = [
@@ -114,6 +124,7 @@ def update_transcriber_config(data: TranscriberConfigRequest):
     config = transcriber_config_manager.update_config(
         transcriber_type=data.transcriber_type,
         whisper_model_size=data.whisper_model_size,
+        doubao_asr=data.doubao_asr.model_dump(exclude_none=True) if data.doubao_asr else None,
     )
     return R.success(data=config)
 

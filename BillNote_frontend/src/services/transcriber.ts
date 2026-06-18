@@ -3,6 +3,7 @@ import request from '@/utils/request'
 export interface TranscriberConfig {
   transcriber_type: string
   whisper_model_size: string
+  doubao_asr: DoubaoASRConfig
   available_types: { value: string; label: string }[]
   whisper_model_sizes: string[]
   /** 内置模型映射：size → HF repo_id */
@@ -10,6 +11,24 @@ export interface TranscriberConfig {
   /** 用户自定义模型映射：名称 → HF repo_id 或本地路径 */
   whisper_custom_models?: Record<string, string>
   mlx_whisper_available: boolean
+}
+
+export interface DoubaoASRConfig {
+  api_key_configured: boolean
+  api_key_source: string
+  resource_id: string
+  poll_interval_seconds: number
+  timeout_seconds: number
+  max_audio_size_mb: number
+}
+
+export interface DoubaoASRConfigUpdate {
+  api_key?: string
+  clear_api_key?: boolean
+  resource_id?: string
+  poll_interval_seconds?: number
+  timeout_seconds?: number
+  max_audio_size_mb?: number
 }
 
 export interface ModelStatus {
@@ -31,6 +50,7 @@ export const getTranscriberConfig = async (): Promise<TranscriberConfig> => {
 export const updateTranscriberConfig = async (data: {
   transcriber_type: string
   whisper_model_size?: string
+  doubao_asr?: DoubaoASRConfigUpdate
 }) => {
   return await request.post('/transcriber_config', data)
 }
