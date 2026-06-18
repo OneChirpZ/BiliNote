@@ -199,7 +199,7 @@ const Onboarding = () => {
     setError('')
     setSavingTranscriber(true)
     try {
-      // fast-whisper / mlx-whisper 需指定 model size；在线 (groq/bcut/kuaishou) 不用
+      // fast-whisper / mlx-whisper 需指定 model size；在线 (groq/bcut/kuaishou/doubao-asr) 不用
       const needsSize = transcriberType === 'fast-whisper' || transcriberType === 'mlx-whisper'
       await updateTranscriberConfig({
         transcriber_type: transcriberType,
@@ -309,6 +309,7 @@ const Onboarding = () => {
             <div className="grid gap-2">
               {[
                 { value: 'groq', title: 'Groq（在线，推荐）', desc: '注册 https://groq.com/ 拿免费 key；速度快、英文语料佳。无需本地模型。' },
+                { value: 'doubao-asr', title: '火山引擎豆包 ASR（在线，中文优先）', desc: '使用录音文件识别标准版；需要在后端 .env 配置 VOLCENGINE_ASR_API_KEY。' },
                 { value: 'bcut', title: '必剪（在线，免登）', desc: '免登，中文表现好；偶尔限流。' },
                 { value: 'kuaishou', title: '快手（在线，免登）', desc: '与必剪类似，备选。' },
                 { value: 'fast-whisper', title: 'Faster Whisper（本地）', desc: '完全离线但首次需下载 ~75MB（tiny）至 ~3GB（large-v3）的模型。CPU 慢。' },

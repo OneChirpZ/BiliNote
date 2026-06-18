@@ -52,6 +52,7 @@ AVAILABLE_TRANSCRIBER_TYPES = [
     {"value": "bcut", "label": "必剪（在线）"},
     {"value": "kuaishou", "label": "快手（在线）"},
     {"value": "groq", "label": "Groq（在线）"},
+    {"value": "doubao-asr", "label": "豆包 ASR / 火山引擎（在线）"},
     {"value": "mlx-whisper", "label": "MLX Whisper（仅macOS）"},
 ]
 
@@ -384,7 +385,7 @@ async def sys_health():
         ttype = cfg["transcriber_type"]
         whisper_info["size"] = size
         whisper_info["type"] = ttype
-        # 只有本地引擎才有「下载」概念；groq / bcut / kuaishou 在线引擎跳过
+        # 只有本地引擎才有「下载」概念；groq / doubao-asr / bcut / kuaishou 在线引擎跳过
         if ttype == "fast-whisper":
             whisper_info["downloaded"] = _check_whisper_model_exists(size, "whisper")
             whisper_info["checked"] = True
@@ -416,7 +417,7 @@ async def deploy_status():
     """返回部署监控所需的所有状态信息。
 
     所有子项都用 try 包起来——监控页本身不应该被任何一个子项打死。
-    特别是 torch：它只在 fast-whisper 路径用得到，用 Groq / 必剪 / 快手在线
+    特别是 torch：它只在 fast-whisper 路径用得到，用 Groq / 豆包 ASR / 必剪 / 快手在线
     引擎的轻量部署完全可以不装，那种情况这个 endpoint 不应该 500。
     """
     import os

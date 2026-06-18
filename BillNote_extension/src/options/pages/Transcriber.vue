@@ -85,7 +85,7 @@ onMounted(refresh)
   <div class="p-6 max-w-3xl">
     <h1 class="text-xl font-bold mb-1">音频转写配置</h1>
     <p class="text-xs text-gray-500 mb-4">
-      选择把视频音频转成文字的引擎。在线引擎（Groq / 必剪 / 快手）走第三方 API，本地 Whisper 需要先下载模型。
+      选择把视频音频转成文字的引擎。在线引擎（Groq / 豆包 ASR / 必剪 / 快手）走第三方 API，本地 Whisper 需要先下载模型。
     </p>
 
     <div v-if="loading" class="text-sm text-gray-500">加载中…</div>
@@ -99,7 +99,7 @@ onMounted(refresh)
           </option>
         </select>
         <p v-if="selType === 'mlx-whisper' && !config.mlx_whisper_available" class="text-xs text-red-600">
-          ⚠ 当前后端没有装 mlx_whisper 包（仅 macOS 可用）。如果不是 Mac，请改用 fast-whisper / Groq / 必剪 / 快手。
+          ⚠ 当前后端没有装 mlx_whisper 包（仅 macOS 可用）。如果不是 Mac，请改用 fast-whisper / Groq / 豆包 ASR / 必剪 / 快手。
         </p>
       </section>
 

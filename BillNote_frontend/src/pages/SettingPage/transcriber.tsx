@@ -104,7 +104,7 @@ export default function Transcriber() {
         }
         const ok = window.confirm(
           `选择 ${selectedType} / ${selectedModelSize} 后，首次转写时会下载该模型（${sizeHint[selectedModelSize] || '体积未知'}）。\n` +
-          `网络较差时容易中断；推荐改用 Groq / 必剪 / 快手 等在线引擎。\n\n` +
+          `网络较差时容易中断；推荐改用 Groq / 豆包 ASR / 必剪 / 快手 等在线引擎。\n\n` +
           '继续保存吗？',
         )
         if (!ok) return

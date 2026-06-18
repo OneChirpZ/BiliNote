@@ -148,7 +148,7 @@ export interface ProviderCreatePayload {
   logo?: string
 }
 
-export type TranscriberType = 'fast-whisper' | 'bcut' | 'kuaishou' | 'groq' | 'mlx-whisper'
+export type TranscriberType = 'fast-whisper' | 'bcut' | 'kuaishou' | 'groq' | 'mlx-whisper' | 'doubao-asr'
 export type WhisperModelSize = 'tiny' | 'base' | 'small' | 'medium' | 'large-v3' | 'large-v3-turbo'
 
 export interface TranscriberOption {
@@ -182,4 +182,3 @@ export interface DeployStatus {
   whisper: { model_size: string, transcriber_type: string }
   ffmpeg: { available: boolean }
 }
-
